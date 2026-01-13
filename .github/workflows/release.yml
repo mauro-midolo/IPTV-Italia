@@ -1,40 +1,76 @@
-name: Update Release Asset
+name: Auto Release IPTV
 
 on:
   push:
     branches:
       - main
-#    paths:
-#      - iptvitalia.m3u   # Trigger solo se cambia questo file
+    paths:
+      - iptvitalia.m3u   # Trigger solo se cambia questo file
 
 permissions:
   contents: write
-  packages: write
 
 jobs:
-  update-release:
+  auto-release:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v3
 
-      - name: Delete Release (if exists)
+      - name: Get last semver tag (vX.Y.Z)
+        id: get_last
         run: |
-          gh release delete v1.0.0 -y || true
+          # Prendo tutti i tag tipo vX.Y.Z
+          git fetch --tags --force
 
-      - name: Delete Tag (if exists)
-        run: |
-          git push --delete origin v1.0.0 || true
+          TAGS=$(git tag --list 'v*.*.*')
 
-      - name: Create Release
-        run: |
-          gh release create v1.0.0 \
-            --title "IPTV Italia" \
-            --notes "Aggiornamento automatico della playlist"
+          if [ -z "$TAGS" ]; then
+            echo "Nessun tag trovato, partirò da v1.0.0"
+            echo "LAST_TAG=" >> $GITHUB_OUTPUT
+          else
+            LAST_TAG=$(echo "$TAGS" | sort -V | tail -n 1)
+            echo "Ultimo tag trovato: $LAST_TAG"
+            echo "LAST_TAG=$LAST_TAG" >> $GITHUB_OUTPUT
+          fi
 
-      - name: Upload Asset
+      - name: Compute next version
+        id: next
         run: |
-          gh release upload v1.0.0 iptvitalia.m3u --clobber
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LAST_TAG="${{ steps.get_last.outputs.LAST_TAG }}"
+
+          if [ -z "$LAST_TAG" ]; then
+            # Nessun tag esistente -> partiamo da v1.0.0
+            NEW_TAG="v1.0.0"
+          else
+            # Rimuovo la 'v' iniziale
+            VERSION="${LAST_TAG#v}"
+
+            # Split MAJOR.MINOR.PATCH
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+
+            # Se per qualche motivo PATCH è vuoto/non numero, fallback a 0
+            PATCH=${PATCH:-0}
+
+            PATCH=$((PATCH + 1))
+
+            NEW_TAG="v${MAJOR}.${MINOR}.${PATCH}"
+          fi
+
+          echo "Nuovo tag: $NEW_TAG"
+          echo "NEW_TAG=$NEW_TAG" >> $GITHUB_OUTPUT
+
+      - name: Create release
+        run: |
+          gh release create "${{ steps.next.outputs.NEW_TAG }}" \
+            --title "IPTV Release ${{ steps.next.outputs.NEW_TAG }}" \
+            --notes "Aggiornamento automatico della playlist iptvitalia.m3u."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload asset
+        run: |
+          gh release upload "${{ steps.next.outputs.NEW_TAG }}" iptvitalia.m3u
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
