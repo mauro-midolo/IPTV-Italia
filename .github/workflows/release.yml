@@ -4,8 +4,8 @@ on:
   push:
     branches:
       - main
-    paths:
-      - iptvitalia.m3u   # Trigger solo se cambia questo file
+#    paths:
+#      - iptvitalia.m3u   # Trigger solo se cambia questo file
 
 permissions:
   contents: write
