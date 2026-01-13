@@ -1,0 +1,40 @@
+name: Update Release Asset
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - iptvitalia.m3u   # Trigger solo se cambia questo file
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  update-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Delete Release (if exists)
+        run: |
+          gh release delete v1.0.0 -y || true
+
+      - name: Delete Tag (if exists)
+        run: |
+          git push --delete origin v1.0.0 || true
+
+      - name: Create Release
+        run: |
+          gh release create v1.0.0 \
+            --title "IPTV Italia" \
+            --notes "Aggiornamento automatico della playlist"
+
+      - name: Upload Asset
+        run: |
+          gh release upload v1.0.0 iptvitalia.m3u --clobber
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
