@@ -60,11 +60,18 @@ jobs:
 
           echo "Nuovo tag: $NEW_TAG"
           echo "NEW_TAG=$NEW_TAG" >> $GITHUB_OUTPUT
-
+      - name: Data in italiano
+        id: itdate
+        run: |
+          mesi=(Gennaio Febbraio Marzo Aprile Maggio Giugno Luglio Agosto Settembre Ottobre Novembre Dicembre)
+          g=$(date +%-d)
+          m=$(date +%-m)
+          a=$(date +%Y)
+          echo "date=$g ${mesi[$m-1]} $a" >> $GITHUB_OUTPUT
       - name: Create release
         run: |
           gh release create "${{ steps.next.outputs.NEW_TAG }}" \
-            --title "IPTV-Italia ${{ steps.next.outputs.NEW_TAG }} ($(LC_TIME=it_IT.UTF-8 date '+%d %B %Y'))" \
+            --title "IPTV-Italia ${{ steps.next.outputs.NEW_TAG }} (${{ steps.itdate.outputs.date }})" \
             --notes "Aggiornamento automatico della playlist iptvitalia.m3u."
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
