@@ -64,7 +64,7 @@ jobs:
       - name: Create release
         run: |
           gh release create "${{ steps.next.outputs.NEW_TAG }}" \
-            --title "IPTV-Italia ${{ steps.next.outputs.NEW_TAG }}" \
+            --title "IPTV-Italia ${{ steps.next.outputs.NEW_TAG }} ($(LC_TIME=it_IT.UTF-8 date '+%d %B %Y'))" \
             --notes "Aggiornamento automatico della playlist iptvitalia.m3u."
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
