@@ -2,12 +2,23 @@
 
 Repository dedicato a risorse **IPTV legali** per canali italiani *free-to-air*.
 
-> ⚠️ Questo progetto **non** ospita né distribuirà mai liste di canali a pagamento
-> o contenuti protetti da copyright senza autorizzazione.  
-> Lo scopo è solo didattico e informativo.
+## Come usare la playlist
 
-## Come usare le playlist
+### 🔹 Opzione 1 — Link diretto (consigliato)
 
-1. Scarica il file `.m3u` dalla cartella `playlists`.
+Copia e incolla questo link nel tuo player IPTV: [link](https://raw.githubusercontent.com/mauro-midolo/IPTV-Italia/refs/heads/main/iptvitalia.m3u)
+
+Questo metodo permette di ricevere automaticamente eventuali aggiornamenti della playlist.
+
+### 🔹 Opzione 2 — Download
+
+1. Scarica il file `iptvitalia.m3u` dalla root di questo repository.
 2. Aprilo con un player compatibile (es. VLC).
-3. Seleziona il canale che vuoi vedere.
+3. Seleziona il canale che desideri vedere.
+
+---
+
+## Disclaimer
+
+Questa playlist include solo canali italiani **free-to-air** trasmessi legalmente.  
+Non vengono distribuiti canali criptati, pay TV o contenuti protetti da copyright senza autorizzazione.
