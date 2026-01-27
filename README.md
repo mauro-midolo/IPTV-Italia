@@ -9,7 +9,7 @@ Repository dedicato a risorse **IPTV legali** per canali italiani *free-to-air*.
 
 ### 🔹 Opzione 1 — Link diretto (consigliato)
 
-Copia e incolla questo link nel tuo player IPTV: [link](https://raw.githubusercontent.com/mauro-midolo/IPTV-Italia/refs/heads/main/iptvitalia.m3u)
+Copia e incolla questo link nel tuo player IPTV: [link](https://github.com/mauro-midolo/IPTV-Italia/releases/latest/download/iptvitalia.m3u)
 
 Questo metodo permette di ricevere automaticamente eventuali aggiornamenti della playlist.
 
