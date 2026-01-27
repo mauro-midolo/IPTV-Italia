@@ -1,5 +1,8 @@
 # IPTV-Italia
 
+![GitHub Release Version](https://img.shields.io/github/v/release/mauro-midolo/IPTV-Italia) ![GitHub Release Downloads](https://img.shields.io/github/downloads/mauro-midolo/IPTV-Italia/total)
+
+
 Repository dedicato a risorse **IPTV legali** per canali italiani *free-to-air*.
 
 ## Come usare la playlist
