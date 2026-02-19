@@ -2,6 +2,7 @@
 import argparse
 import re
 import sys
+import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -24,10 +25,6 @@ class Entry:
 
 
 def normalize_m3u_text(raw: str) -> str:
-    """
-    Nel repo il file può essere "tutto su una riga" con spazi.
-    Inseriamo newline prima di #EXT e prima di http(s) per parsarlo bene.
-    """
     s = re.sub(r"[ \t]+", " ", raw.replace("\r", "").replace("\n", " ").strip())
     s = re.sub(r" (?=#EXT)", "\n", s)
     s = re.sub(r" (?=https?://)", "\n", s)
@@ -62,12 +59,30 @@ def sniff_type(url: str) -> str:
     return "http"
 
 
+def is_likely_dns_error(ex: Exception) -> bool:
+    # requests/urllib3 usa messaggi diversi a seconda della versione
+    msg = str(ex).lower()
+    return any(
+        token in msg
+        for token in [
+            "name or service not known",
+            "failed to resolve",
+            "temporary failure in name resolution",
+            "nodename nor servname provided",
+            "dns",
+        ]
+    )
+
+
+def is_timeout_error(ex: Exception) -> bool:
+    return isinstance(ex, (requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout)) or "timed out" in str(ex).lower()
+
+
 def http_get_some(url: str, ua: Optional[str], timeout_s: int, max_bytes: int) -> Tuple[int, str, bytes]:
     headers = {}
     if ua:
         headers["User-Agent"] = ua
 
-    # Molti endpoint non gradiscono HEAD: facciamo GET "streaming" e leggiamo pochi byte
     r = requests.get(url, headers=headers, timeout=timeout_s, allow_redirects=True, stream=True)
     status = r.status_code
     ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
@@ -87,33 +102,66 @@ def http_get_some(url: str, ua: Optional[str], timeout_s: int, max_bytes: int) -
     return status, ctype, data
 
 
-def check_entry(e: Entry, timeout_s: int, treat_403_as_warn: bool = True) -> Tuple[Status, str]:
+def check_entry(
+    e: Entry,
+    timeout_s: int,
+    retries: int,
+    backoff_s: float,
+    strict: bool,
+) -> Tuple[Status, str]:
     stype = sniff_type(e.url)
-    try:
-        status, ctype, data = http_get_some(e.url, e.user_agent, timeout_s=timeout_s, max_bytes=4096)
-    except requests.exceptions.RequestException as ex:
-        return Status.FAIL, f"REQUEST_ERROR: {ex}"
 
-    # Tipico per stream che funzionano nei player ma bloccano bot / no-cookie / no-referer / geo:
-    if status in (403, 451) and treat_403_as_warn:
-        return Status.WARN, f"RESTRICTED_HTTP_{status} ({ctype or 'no-ctype'})"
+    last_ex: Optional[Exception] = None
+    for attempt in range(1, retries + 1):
+        try:
+            status, ctype, data = http_get_some(e.url, e.user_agent, timeout_s=timeout_s, max_bytes=4096)
 
-    if status < 200 or status >= 400:
-        return Status.FAIL, f"HTTP_{status} ({ctype or 'no-ctype'})"
+            # 403/451: spesso “funziona nel player” ma blocca bot/datacenter/cookie
+            if status in (403, 451) and not strict:
+                return Status.WARN, f"RESTRICTED_HTTP_{status} ({ctype or 'no-ctype'})"
 
-    head = data.decode("utf-8", errors="ignore")
+            # altri status non OK
+            if status < 200 or status >= 400:
+                # se non strict, alcuni 5xx possono essere “flaky”: ritenta
+                if not strict and status >= 500 and attempt < retries:
+                    time.sleep(backoff_s * attempt)
+                    continue
+                return Status.FAIL, f"HTTP_{status} ({ctype or 'no-ctype'})"
 
-    if stype == "hls":
-        if "#EXTM3U" in head:
-            return Status.OK, f"OK (HLS, {ctype or 'no-ctype'})"
-        return Status.FAIL, f"BAD_HLS_CONTENT (HTTP_{status})"
+            head = data.decode("utf-8", errors="ignore")
 
-    if stype == "dash":
-        if "<MPD" in head or "urn:mpeg:dash:schema:mpd" in head:
-            return Status.OK, f"OK (DASH, {ctype or 'no-ctype'})"
-        return Status.FAIL, f"BAD_DASH_CONTENT (HTTP_{status})"
+            if stype == "hls":
+                if "#EXTM3U" in head:
+                    return Status.OK, f"OK (HLS, {ctype or 'no-ctype'})"
+                return Status.FAIL, f"BAD_HLS_CONTENT (HTTP_{status})"
 
-    return Status.OK, f"OK (HTTP_{status}, {ctype or 'no-ctype'})"
+            if stype == "dash":
+                if "<MPD" in head or "urn:mpeg:dash:schema:mpd" in head:
+                    return Status.OK, f"OK (DASH, {ctype or 'no-ctype'})"
+                return Status.FAIL, f"BAD_DASH_CONTENT (HTTP_{status})"
+
+            return Status.OK, f"OK (HTTP_{status}, {ctype or 'no-ctype'})"
+
+        except requests.exceptions.RequestException as ex:
+            last_ex = ex
+
+            # Se non strict: timeout/DNS => WARN (flaky / dipende dal runner)
+            if not strict and (is_timeout_error(ex) or is_likely_dns_error(ex)):
+                # ritenta un paio di volte prima di decidere WARN
+                if attempt < retries:
+                    time.sleep(backoff_s * attempt)
+                    continue
+                kind = "TIMEOUT" if is_timeout_error(ex) else "DNS"
+                return Status.WARN, f"{kind}_ERROR: {ex}"
+
+            # altre eccezioni: ritenta, poi FAIL
+            if attempt < retries:
+                time.sleep(backoff_s * attempt)
+                continue
+            return Status.FAIL, f"REQUEST_ERROR: {ex}"
+
+    # fallback
+    return Status.FAIL, f"REQUEST_ERROR: {last_ex}"
 
 
 def write_report(path: Path, results: List[Tuple[Entry, Status, str]]) -> None:
@@ -125,7 +173,7 @@ def write_report(path: Path, results: List[Tuple[Entry, Status, str]]) -> None:
     out.append("# IPTV stream check report\n\n")
     out.append(f"- Total: **{len(results)}**\n")
     out.append(f"- OK: **{ok}**\n")
-    out.append(f"- WARN (restricted): **{warn}**\n")
+    out.append(f"- WARN (restricted/flaky): **{warn}**\n")
     out.append(f"- FAIL: **{fail}**\n\n")
     out.append("---\n\n")
 
@@ -137,50 +185,10 @@ def write_report(path: Path, results: List[Tuple[Entry, Status, str]]) -> None:
         out.append("\n---\n\n")
 
     if warn:
-        out.append("## ⚠️ WARN streams (likely working in real players)\n\n")
+        out.append("## ⚠️ WARN streams (likely OK in real players / flaky)\n\n")
         for e, st, msg in results:
             if st == Status.WARN:
                 out.append(f"- **{e.name}**\n  - URL: `{e.url}`\n  - Result: `{msg}`\n")
         out.append("\n---\n\n")
 
-    out.append("## All streams\n\n")
-    for e, st, msg in results:
-        icon = "✅" if st == Status.OK else ("⚠️" if st == Status.WARN else "❌")
-        out.append(f"- {icon} **{e.name}** — `{msg}`\n  - `{e.url}`\n")
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("".join(out), encoding="utf-8")
-
-
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--playlist", default="iptvitalia.m3u")
-    ap.add_argument("--timeout", type=int, default=15)
-    ap.add_argument("--report", default="stream-check/report.md")
-    ap.add_argument("--strict", action="store_true", help="Fail also on 403/451 (treat as FAIL instead of WARN)")
-    args = ap.parse_args()
-
-    raw = Path(args.playlist).read_text(encoding="utf-8", errors="ignore")
-    norm = normalize_m3u_text(raw)
-    entries = parse_entries(norm)
-
-    if not entries:
-        print("No entries found in playlist.", file=sys.stderr)
-        return 2
-
-    results: List[Tuple[Entry, Status, str]] = []
-    for e in entries:
-        st, msg = check_entry(e, timeout_s=args.timeout, treat_403_as_warn=(not args.strict))
-        results.append((e, st, msg))
-
-        label = "OK" if st == Status.OK else ("WARN" if st == Status.WARN else "FAIL")
-        print(f"{label} - {e.name} - {msg}")
-
-    write_report(Path(args.report), results)
-
-    # Fallisce solo se ci sono FAIL veri (a meno di --strict)
-    return 1 if any(st == Status.FAIL for _, st, _ in results) else 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    out.append("## A
