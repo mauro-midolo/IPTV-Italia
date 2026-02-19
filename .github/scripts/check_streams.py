@@ -310,9 +310,9 @@ def build_html(results: List[Tuple[Entry, Status, str]]) -> str:
         </div>
 
         <div class="col-12 col-lg-2">
-          <label class="form-label muted small mb-1">Visibili</label>
+          <!--<label class="form-label muted small mb-1">Visibili</label>-->
           <div class="glass rounded-3 px-3 py-2 text-center">
-            <div class="small muted">righe</div>
+            <div class="small muted">Stream</div>
             <div class="h5 mb-0 mono" id="visibleCount">0</div>
           </div>
         </div>
