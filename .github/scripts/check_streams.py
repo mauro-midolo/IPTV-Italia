@@ -83,30 +83,39 @@ def http_get_some(url: str, ua: Optional[str], timeout_s: int):
     return status, data
 
 
-def check_entry(e: Entry, timeout_s: int) -> Tuple[Status, str]:
+def check_entry(e: Entry, timeout_s: int, retries: int, backoff: float) -> Tuple[Status, str]:
     stype = sniff_type(e.url)
 
-    try:
-        status, data = http_get_some(e.url, e.user_agent, timeout_s)
+    for attempt in range(1, retries + 1):
+        try:
+            status, data = http_get_some(e.url, e.user_agent, timeout_s)
 
-        if status in (403, 451):
-            return Status.WARN, f"Restricted (HTTP {status})"
+            if status in (403, 451):
+                return Status.WARN, f"Restricted (HTTP {status})"
 
-        if status < 200 or status >= 400:
-            return Status.FAIL, f"HTTP {status}"
+            if status < 200 or status >= 400:
+                if attempt < retries:
+                    time.sleep(backoff * attempt)
+                    continue
+                return Status.FAIL, f"HTTP {status}"
 
-        head = data.decode("utf-8", errors="ignore")
+            head = data.decode("utf-8", errors="ignore")
 
-        if stype == "hls" and "#EXTM3U" in head:
-            return Status.OK, "OK (HLS)"
+            if stype == "hls" and "#EXTM3U" in head:
+                return Status.OK, "OK (HLS)"
 
-        if stype == "dash" and "<MPD" in head:
-            return Status.OK, "OK (DASH)"
+            if stype == "dash" and "<MPD" in head:
+                return Status.OK, "OK (DASH)"
 
-        return Status.OK, "OK"
+            return Status.OK, "OK"
 
-    except requests.exceptions.RequestException:
-        return Status.WARN, "Network/DNS issue"
+        except requests.exceptions.RequestException:
+            if attempt < retries:
+                time.sleep(backoff * attempt)
+                continue
+            return Status.WARN, "Network/DNS issue"
+
+    return Status.FAIL, "Unknown error"
 
 
 def build_html(results: List[Tuple[Entry, Status, str]]) -> str:
@@ -127,7 +136,7 @@ def build_html(results: List[Tuple[Entry, Status, str]]) -> str:
         icon = "✓" if s == Status.OK else "⚠" if s == Status.WARN else "✕"
 
         rows.append(f"""
-        <tr data-status="{s.value}" data-search="{html.escape((e.name + msg + e.url).lower(), quote=True)}">
+        <tr data-search="{html.escape((e.name + msg + e.url).lower(), quote=True)}">
           <td>
             <span class="badge bg-{badge_class} status-badge">
               {icon} {s.value}
@@ -175,7 +184,6 @@ body {{
   top:0;
   background:#0b1020;
 }}
-
 </style>
 </head>
 
@@ -240,6 +248,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--playlist", default="iptvitalia.m3u")
     ap.add_argument("--timeout", type=int, default=30)
+    ap.add_argument("--retries", type=int, default=3)
+    ap.add_argument("--backoff", type=float, default=1.2)
     ap.add_argument("--output", default="site/index.html")
     args = ap.parse_args()
 
@@ -248,7 +258,7 @@ def main():
 
     results = []
     for e in entries:
-        status, msg = check_entry(e, args.timeout)
+        status, msg = check_entry(e, args.timeout, args.retries, args.backoff)
         results.append((e, status, msg))
         print(status.value, "-", e.name)
 
