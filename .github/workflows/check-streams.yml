@@ -1,0 +1,39 @@
+name: Check IPTV streams
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "iptvitalia.m3u"
+      - ".github/scripts/check_streams.py"
+      - ".github/workflows/check-streams.yml"
+  schedule:
+    - cron: "0 6 * * *"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install requests
+
+      - name: Run stream checks
+        run: |
+          python .github/scripts/check_streams.py --playlist iptvitalia.m3u --timeout 15 --report stream-check/report.md
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stream-check-report
+          path: stream-check/report.md
