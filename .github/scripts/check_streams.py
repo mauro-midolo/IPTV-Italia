@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 import argparse
+import html
 import re
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -60,7 +62,6 @@ def sniff_type(url: str) -> str:
 
 
 def is_likely_dns_error(ex: Exception) -> bool:
-    # requests/urllib3 usa messaggi diversi a seconda della versione
     msg = str(ex).lower()
     return any(
         token in msg
@@ -68,7 +69,6 @@ def is_likely_dns_error(ex: Exception) -> bool:
             "name or service not known",
             "failed to resolve",
             "temporary failure in name resolution",
-            "nodename nor servname provided",
             "dns",
         ]
     )
@@ -78,7 +78,7 @@ def is_timeout_error(ex: Exception) -> bool:
     return isinstance(ex, (requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout)) or "timed out" in str(ex).lower()
 
 
-def http_get_some(url: str, ua: Optional[str], timeout_s: int, max_bytes: int) -> Tuple[int, str, bytes]:
+def http_get_some(url: str, ua: Optional[str], timeout_s: int, max_bytes: int):
     headers = {}
     if ua:
         headers["User-Agent"] = ua
@@ -94,7 +94,6 @@ def http_get_some(url: str, ua: Optional[str], timeout_s: int, max_bytes: int) -
                 break
             data += chunk
             if len(data) >= max_bytes:
-                data = data[:max_bytes]
                 break
     finally:
         r.close()
@@ -102,139 +101,110 @@ def http_get_some(url: str, ua: Optional[str], timeout_s: int, max_bytes: int) -
     return status, ctype, data
 
 
-def check_entry(
-    e: Entry,
-    timeout_s: int,
-    retries: int,
-    backoff_s: float,
-    strict: bool,
-) -> Tuple[Status, str]:
+def check_entry(e: Entry, timeout_s: int, retries: int, strict: bool) -> Tuple[Status, str]:
     stype = sniff_type(e.url)
 
-    last_ex: Optional[Exception] = None
-    for attempt in range(1, retries + 1):
+    for attempt in range(retries):
         try:
-            status, ctype, data = http_get_some(e.url, e.user_agent, timeout_s=timeout_s, max_bytes=4096)
+            status, ctype, data = http_get_some(e.url, e.user_agent, timeout_s, 4096)
 
-            # 403/451: spesso “funziona nel player” ma blocca bot/datacenter/cookie
             if status in (403, 451) and not strict:
-                return Status.WARN, f"RESTRICTED_HTTP_{status} ({ctype or 'no-ctype'})"
+                return Status.WARN, f"Restricted (HTTP {status})"
 
-            # altri status non OK
             if status < 200 or status >= 400:
-                # se non strict, alcuni 5xx possono essere “flaky”: ritenta
-                if not strict and status >= 500 and attempt < retries:
-                    time.sleep(backoff_s * attempt)
-                    continue
-                return Status.FAIL, f"HTTP_{status} ({ctype or 'no-ctype'})"
+                return Status.FAIL, f"HTTP {status}"
 
             head = data.decode("utf-8", errors="ignore")
 
-            if stype == "hls":
-                if "#EXTM3U" in head:
-                    return Status.OK, f"OK (HLS, {ctype or 'no-ctype'})"
-                return Status.FAIL, f"BAD_HLS_CONTENT (HTTP_{status})"
+            if stype == "hls" and "#EXTM3U" in head:
+                return Status.OK, "OK (HLS)"
 
-            if stype == "dash":
-                if "<MPD" in head or "urn:mpeg:dash:schema:mpd" in head:
-                    return Status.OK, f"OK (DASH, {ctype or 'no-ctype'})"
-                return Status.FAIL, f"BAD_DASH_CONTENT (HTTP_{status})"
+            if stype == "dash" and ("<MPD" in head or "urn:mpeg:dash:schema:mpd" in head):
+                return Status.OK, "OK (DASH)"
 
-            return Status.OK, f"OK (HTTP_{status}, {ctype or 'no-ctype'})"
+            return Status.OK, "OK"
 
         except requests.exceptions.RequestException as ex:
-            last_ex = ex
-
-            # Se non strict: timeout/DNS => WARN (flaky / dipende dal runner)
             if not strict and (is_timeout_error(ex) or is_likely_dns_error(ex)):
-                # ritenta un paio di volte prima di decidere WARN
-                if attempt < retries:
-                    time.sleep(backoff_s * attempt)
-                    continue
-                kind = "TIMEOUT" if is_timeout_error(ex) else "DNS"
-                return Status.WARN, f"{kind}_ERROR: {ex}"
+                return Status.WARN, "Network/DNS issue"
 
-            # altre eccezioni: ritenta, poi FAIL
-            if attempt < retries:
-                time.sleep(backoff_s * attempt)
-                continue
-            return Status.FAIL, f"REQUEST_ERROR: {ex}"
+            if attempt == retries - 1:
+                return Status.FAIL, "Request error"
 
-    # fallback
-    return Status.FAIL, f"REQUEST_ERROR: {last_ex}"
+            time.sleep(1)
+
+    return Status.FAIL, "Request error"
 
 
-def write_report(path: Path, results: List[Tuple[Entry, Status, str]]) -> None:
-    ok = sum(1 for _, st, _ in results if st == Status.OK)
-    warn = sum(1 for _, st, _ in results if st == Status.WARN)
-    fail = sum(1 for _, st, _ in results if st == Status.FAIL)
+def build_html(results: List[Tuple[Entry, Status, str]]) -> str:
+    ok = sum(1 for _, s, _ in results if s == Status.OK)
+    warn = sum(1 for _, s, _ in results if s == Status.WARN)
+    fail = sum(1 for _, s, _ in results if s == Status.FAIL)
 
-    out: List[str] = []
-    out.append("# IPTV stream check report\n\n")
-    out.append(f"- Total: **{len(results)}**\n")
-    out.append(f"- OK: **{ok}**\n")
-    out.append(f"- WARN (restricted/flaky): **{warn}**\n")
-    out.append(f"- FAIL: **{fail}**\n\n")
-    out.append("---\n\n")
+    generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-    if fail:
-        out.append("## ❌ FAIL streams\n\n")
-        for e, st, msg in results:
-            if st == Status.FAIL:
-                out.append(f"- **{e.name}**\n  - URL: `{e.url}`\n  - Result: `{msg}`\n")
-        out.append("\n---\n\n")
+    rows = []
+    for e, s, msg in results:
+        icon = "✅" if s == Status.OK else ("⚠️" if s == Status.WARN else "❌")
+        rows.append(
+            f"<tr>"
+            f"<td>{icon}</td>"
+            f"<td>{html.escape(e.name)}</td>"
+            f"<td>{html.escape(msg)}</td>"
+            f"<td><a href='{html.escape(e.url)}' target='_blank'>link</a></td>"
+            f"</tr>"
+        )
 
-    if warn:
-        out.append("## ⚠️ WARN streams (likely OK in real players / flaky)\n\n")
-        for e, st, msg in results:
-            if st == Status.WARN:
-                out.append(f"- **{e.name}**\n  - URL: `{e.url}`\n  - Result: `{msg}`\n")
-        out.append("\n---\n\n")
+    return f"""<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>IPTV Italia Monitor</title>
+<style>
+body {{ font-family: system-ui; margin:40px; }}
+table {{ border-collapse: collapse; width:100%; }}
+td,th {{ padding:8px; border-bottom:1px solid #ddd; }}
+th {{ text-align:left; }}
+</style>
+</head>
+<body>
+<h1>IPTV Italia – Stream Monitor</h1>
+<p>Generated: {generated}</p>
+<p>OK: {ok} | WARN: {warn} | FAIL: {fail}</p>
+<table>
+<tr><th></th><th>Channel</th><th>Status</th><th>URL</th></tr>
+{''.join(rows)}
+</table>
+</body>
+</html>
+"""
 
-    out.append("## All streams\n\n")
-    for e, st, msg in results:
-        icon = "✅" if st == Status.OK else ("⚠️" if st == Status.WARN else "❌")
-        out.append(f"- {icon} **{e.name}** — `{msg}`\n  - `{e.url}`\n")
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("".join(out), encoding="utf-8")
-
-
-def main() -> int:
+def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--playlist", default="iptvitalia.m3u")
     ap.add_argument("--timeout", type=int, default=25)
-    ap.add_argument("--retries", type=int, default=3)
-    ap.add_argument("--backoff", type=float, default=1.25)
-    ap.add_argument("--report", default="stream-check/report.md")
-    ap.add_argument("--strict", action="store_true", help="Treat 403/451 + DNS/timeout as FAIL (no WARN).")
+    ap.add_argument("--retries", type=int, default=2)
+    ap.add_argument("--strict", action="store_true")
+    ap.add_argument("--output", default="site/index.html")
     args = ap.parse_args()
 
     raw = Path(args.playlist).read_text(encoding="utf-8", errors="ignore")
-    norm = normalize_m3u_text(raw)
-    entries = parse_entries(norm)
+    entries = parse_entries(normalize_m3u_text(raw))
 
-    if not entries:
-        print("No entries found in playlist.", file=sys.stderr)
-        return 2
-
-    results: List[Tuple[Entry, Status, str]] = []
+    results = []
     for e in entries:
-        st, msg = check_entry(
-            e,
-            timeout_s=args.timeout,
-            retries=args.retries,
-            backoff_s=args.backoff,
-            strict=args.strict,
-        )
-        results.append((e, st, msg))
-        label = st.value
-        print(f"{label} - {e.name} - {msg}")
+        status, msg = check_entry(e, args.timeout, args.retries, args.strict)
+        results.append((e, status, msg))
+        print(status.value, "-", e.name)
 
-    write_report(Path(args.report), results)
+    html_content = build_html(results)
 
-    # FAIL solo se ci sono FAIL veri
-    return 1 if any(st == Status.FAIL for _, st, _ in results) else 0
+    out = Path(args.output)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(html_content, encoding="utf-8")
+
+    return 1 if any(s == Status.FAIL for _, s, _ in results) else 0
 
 
 if __name__ == "__main__":
