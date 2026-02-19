@@ -29,11 +29,14 @@ jobs:
 
       - name: Run stream checks
         run: |
-          python .github/scripts/check_streams.py --playlist iptvitalia.m3u --timeout 30 --report stream-check/report.md
-
-      - name: Upload report
-        if: always()
-        uses: actions/upload-artifact@v4
+          python .github/scripts/check_streams.py \
+            --playlist iptvitalia.m3u \
+            --timeout 30 \
+            --retries 3 \
+            --output site/index.html
+      
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
         with:
-          name: stream-check-report
-          path: stream-check/report.md
+          path: site
+
