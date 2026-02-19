@@ -3,10 +3,17 @@ import argparse
 import re
 import sys
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import List, Optional, Tuple
 
 import requests
+
+
+class Status(Enum):
+    OK = "OK"
+    WARN = "WARN"
+    FAIL = "FAIL"
 
 
 @dataclass
@@ -17,7 +24,10 @@ class Entry:
 
 
 def normalize_m3u_text(raw: str) -> str:
-    # Il file nel repo è su una singola riga con spazi: normalizziamo
+    """
+    Nel repo il file può essere "tutto su una riga" con spazi.
+    Inseriamo newline prima di #EXT e prima di http(s) per parsarlo bene.
+    """
     s = re.sub(r"[ \t]+", " ", raw.replace("\r", "").replace("\n", " ").strip())
     s = re.sub(r" (?=#EXT)", "\n", s)
     s = re.sub(r" (?=https?://)", "\n", s)
@@ -57,6 +67,7 @@ def http_get_some(url: str, ua: Optional[str], timeout_s: int, max_bytes: int) -
     if ua:
         headers["User-Agent"] = ua
 
+    # Molti endpoint non gradiscono HEAD: facciamo GET "streaming" e leggiamo pochi byte
     r = requests.get(url, headers=headers, timeout=timeout_s, allow_redirects=True, stream=True)
     status = r.status_code
     ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
@@ -76,47 +87,66 @@ def http_get_some(url: str, ua: Optional[str], timeout_s: int, max_bytes: int) -
     return status, ctype, data
 
 
-def check_entry(e: Entry, timeout_s: int) -> Tuple[bool, str]:
+def check_entry(e: Entry, timeout_s: int, treat_403_as_warn: bool = True) -> Tuple[Status, str]:
     stype = sniff_type(e.url)
     try:
         status, ctype, data = http_get_some(e.url, e.user_agent, timeout_s=timeout_s, max_bytes=4096)
     except requests.exceptions.RequestException as ex:
-        return False, f"REQUEST_ERROR: {ex}"
+        return Status.FAIL, f"REQUEST_ERROR: {ex}"
+
+    # Tipico per stream che funzionano nei player ma bloccano bot / no-cookie / no-referer / geo:
+    if status in (403, 451) and treat_403_as_warn:
+        return Status.WARN, f"RESTRICTED_HTTP_{status} ({ctype or 'no-ctype'})"
 
     if status < 200 or status >= 400:
-        return False, f"HTTP_{status} ({ctype or 'no-ctype'})"
+        return Status.FAIL, f"HTTP_{status} ({ctype or 'no-ctype'})"
 
     head = data.decode("utf-8", errors="ignore")
 
     if stype == "hls":
-        return (True, f"OK (HLS, {ctype or 'no-ctype'})") if "#EXTM3U" in head else (False, f"BAD_HLS_CONTENT (HTTP_{status})")
+        if "#EXTM3U" in head:
+            return Status.OK, f"OK (HLS, {ctype or 'no-ctype'})"
+        return Status.FAIL, f"BAD_HLS_CONTENT (HTTP_{status})"
+
     if stype == "dash":
-        return (True, f"OK (DASH, {ctype or 'no-ctype'})") if ("<MPD" in head or "urn:mpeg:dash:schema:mpd" in head) else (False, f"BAD_DASH_CONTENT (HTTP_{status})")
+        if "<MPD" in head or "urn:mpeg:dash:schema:mpd" in head:
+            return Status.OK, f"OK (DASH, {ctype or 'no-ctype'})"
+        return Status.FAIL, f"BAD_DASH_CONTENT (HTTP_{status})"
 
-    return True, f"OK (HTTP_{status}, {ctype or 'no-ctype'})"
+    return Status.OK, f"OK (HTTP_{status}, {ctype or 'no-ctype'})"
 
 
-def write_report(path: Path, results: List[Tuple[Entry, bool, str]]) -> None:
-    ok = sum(1 for _, passed, _ in results if passed)
-    ko = sum(1 for _, passed, _ in results if not passed)
+def write_report(path: Path, results: List[Tuple[Entry, Status, str]]) -> None:
+    ok = sum(1 for _, st, _ in results if st == Status.OK)
+    warn = sum(1 for _, st, _ in results if st == Status.WARN)
+    fail = sum(1 for _, st, _ in results if st == Status.FAIL)
 
-    out = []
+    out: List[str] = []
     out.append("# IPTV stream check report\n\n")
     out.append(f"- Total: **{len(results)}**\n")
     out.append(f"- OK: **{ok}**\n")
-    out.append(f"- KO: **{ko}**\n\n")
+    out.append(f"- WARN (restricted): **{warn}**\n")
+    out.append(f"- FAIL: **{fail}**\n\n")
     out.append("---\n\n")
 
-    if ko:
-        out.append("## KO streams\n\n")
-        for e, passed, msg in results:
-            if not passed:
+    if fail:
+        out.append("## ❌ FAIL streams\n\n")
+        for e, st, msg in results:
+            if st == Status.FAIL:
+                out.append(f"- **{e.name}**\n  - URL: `{e.url}`\n  - Result: `{msg}`\n")
+        out.append("\n---\n\n")
+
+    if warn:
+        out.append("## ⚠️ WARN streams (likely working in real players)\n\n")
+        for e, st, msg in results:
+            if st == Status.WARN:
                 out.append(f"- **{e.name}**\n  - URL: `{e.url}`\n  - Result: `{msg}`\n")
         out.append("\n---\n\n")
 
     out.append("## All streams\n\n")
-    for e, passed, msg in results:
-        out.append(f"- {'✅' if passed else '❌'} **{e.name}** — `{msg}`\n  - `{e.url}`\n")
+    for e, st, msg in results:
+        icon = "✅" if st == Status.OK else ("⚠️" if st == Status.WARN else "❌")
+        out.append(f"- {icon} **{e.name}** — `{msg}`\n  - `{e.url}`\n")
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(out), encoding="utf-8")
@@ -127,6 +157,7 @@ def main() -> int:
     ap.add_argument("--playlist", default="iptvitalia.m3u")
     ap.add_argument("--timeout", type=int, default=15)
     ap.add_argument("--report", default="stream-check/report.md")
+    ap.add_argument("--strict", action="store_true", help="Fail also on 403/451 (treat as FAIL instead of WARN)")
     args = ap.parse_args()
 
     raw = Path(args.playlist).read_text(encoding="utf-8", errors="ignore")
@@ -137,15 +168,18 @@ def main() -> int:
         print("No entries found in playlist.", file=sys.stderr)
         return 2
 
-    results: List[Tuple[Entry, bool, str]] = []
+    results: List[Tuple[Entry, Status, str]] = []
     for e in entries:
-        passed, msg = check_entry(e, timeout_s=args.timeout)
-        results.append((e, passed, msg))
-        print(f"{'OK' if passed else 'KO'} - {e.name} - {msg}")
+        st, msg = check_entry(e, timeout_s=args.timeout, treat_403_as_warn=(not args.strict))
+        results.append((e, st, msg))
+
+        label = "OK" if st == Status.OK else ("WARN" if st == Status.WARN else "FAIL")
+        print(f"{label} - {e.name} - {msg}")
 
     write_report(Path(args.report), results)
 
-    return 1 if any(not passed for _, passed, _ in results) else 0
+    # Fallisce solo se ci sono FAIL veri (a meno di --strict)
+    return 1 if any(st == Status.FAIL for _, st, _ in results) else 0
 
 
 if __name__ == "__main__":
