@@ -191,4 +191,51 @@ def write_report(path: Path, results: List[Tuple[Entry, Status, str]]) -> None:
                 out.append(f"- **{e.name}**\n  - URL: `{e.url}`\n  - Result: `{msg}`\n")
         out.append("\n---\n\n")
 
-    out.append("## A
+    out.append("## All streams\n\n")
+    for e, st, msg in results:
+        icon = "✅" if st == Status.OK else ("⚠️" if st == Status.WARN else "❌")
+        out.append(f"- {icon} **{e.name}** — `{msg}`\n  - `{e.url}`\n")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(out), encoding="utf-8")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--playlist", default="iptvitalia.m3u")
+    ap.add_argument("--timeout", type=int, default=25)
+    ap.add_argument("--retries", type=int, default=3)
+    ap.add_argument("--backoff", type=float, default=1.25)
+    ap.add_argument("--report", default="stream-check/report.md")
+    ap.add_argument("--strict", action="store_true", help="Treat 403/451 + DNS/timeout as FAIL (no WARN).")
+    args = ap.parse_args()
+
+    raw = Path(args.playlist).read_text(encoding="utf-8", errors="ignore")
+    norm = normalize_m3u_text(raw)
+    entries = parse_entries(norm)
+
+    if not entries:
+        print("No entries found in playlist.", file=sys.stderr)
+        return 2
+
+    results: List[Tuple[Entry, Status, str]] = []
+    for e in entries:
+        st, msg = check_entry(
+            e,
+            timeout_s=args.timeout,
+            retries=args.retries,
+            backoff_s=args.backoff,
+            strict=args.strict,
+        )
+        results.append((e, st, msg))
+        label = st.value
+        print(f"{label} - {e.name} - {msg}")
+
+    write_report(Path(args.report), results)
+
+    # FAIL solo se ci sono FAIL veri
+    return 1 if any(st == Status.FAIL for _, st, _ in results) else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
