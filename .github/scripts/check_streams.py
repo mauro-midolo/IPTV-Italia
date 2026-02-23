@@ -165,10 +165,15 @@ def check_entry(
 
             return Status.FAIL, f"Request error: {type(ex).__name__}"
 
+        except Exception as ex:
+            # Catch-all per evitare crash: continuiamo e marchiamo FAIL
+            last_ex = ex
+            return Status.FAIL, f"Unexpected error: {type(ex).__name__}"
+
     return Status.FAIL, f"Request error: {last_ex}"
 
 
-def build_html(results: List[Tuple[Entry, Status, str]]) -> str:
+def build_html(results: List[Tuple[Entry, Status, str]], banner: Optional[str] = None) -> str:
     ok = sum(1 for _, st, _ in results if st == Status.OK)
     warn = sum(1 for _, st, _ in results if st == Status.WARN)
     fail = sum(1 for _, st, _ in results if st == Status.FAIL)
@@ -202,6 +207,20 @@ def build_html(results: List[Tuple[Entry, Status, str]]) -> str:
             </tr>
             """.strip()
         )
+
+    banner_html = ""
+    if banner:
+        banner_html = f"""
+        <div class="alert alert-warning border-0 glass text-white mb-4" role="alert">
+          <div class="d-flex align-items-start gap-2">
+            <div class="fs-5">⚠️</div>
+            <div>
+              <div class="fw-semibold">Nota</div>
+              <div class="small muted">{html.escape(banner)}</div>
+            </div>
+          </div>
+        </div>
+        """.strip()
 
     # Bootstrap 5 (CDN) + Bootstrap Icons (CDN)
     return f"""<!doctype html>
@@ -281,6 +300,8 @@ def build_html(results: List[Tuple[Entry, Status, str]]) -> str:
 
       <hr class="border-white border-opacity-10 my-4" />
 
+      {banner_html}
+
       <div class="row g-3 align-items-end">
         <div class="col-12 col-lg-5">
           <label class="form-label muted small mb-1">Cerca canale / url / messaggio</label>
@@ -310,7 +331,6 @@ def build_html(results: List[Tuple[Entry, Status, str]]) -> str:
         </div>
 
         <div class="col-12 col-lg-2">
-          <!--<label class="form-label muted small mb-1">Visibili</label>-->
           <div class="glass rounded-3 px-3 py-2 text-center">
             <div class="small muted">Stream</div>
             <div class="h5 mb-0 mono" id="visibleCount">0</div>
@@ -394,6 +414,12 @@ def build_html(results: List[Tuple[Entry, Status, str]]) -> str:
 """
 
 
+def write_report(output_path: str, results: List[Tuple[Entry, Status, str]], banner: Optional[str] = None) -> None:
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(build_html(results, banner=banner), encoding="utf-8")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--playlist", default="iptvitalia.m3u")
@@ -404,30 +430,55 @@ def main() -> int:
     ap.add_argument("--output", default="site/index.html")
     args = ap.parse_args()
 
-    raw = Path(args.playlist).read_text(encoding="utf-8", errors="ignore")
-    entries = parse_entries(normalize_m3u_text(raw))
-
-    if not entries:
-        print("No entries found in playlist.", file=sys.stderr)
-        return 2
-
     results: List[Tuple[Entry, Status, str]] = []
-    for e in entries:
-        st, msg = check_entry(
-            e,
-            timeout_s=args.timeout,
-            retries=args.retries,
-            backoff_s=args.backoff,
-            strict=args.strict,
-        )
-        results.append((e, st, msg))
-        print(f"{st.value} - {e.name} - {msg}")
+    exit_code = 0
+    banner: Optional[str] = None
 
-    out = Path(args.output)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(build_html(results), encoding="utf-8")
+    try:
+        raw = Path(args.playlist).read_text(encoding="utf-8", errors="ignore")
+        entries = parse_entries(normalize_m3u_text(raw))
 
-    return 1 if any(st == Status.FAIL for _, st, _ in results) else 0
+        if not entries:
+            # Report comunque, poi falliamo (ma il workflow gestirà il fail dopo il deploy)
+            banner = f"Nessuna entry trovata in playlist: {args.playlist}"
+            write_report(args.output, [], banner=banner)
+            print("No entries found in playlist.", file=sys.stderr)
+            return 1
+
+        for e in entries:
+            try:
+                st, msg = check_entry(
+                    e,
+                    timeout_s=args.timeout,
+                    retries=args.retries,
+                    backoff_s=args.backoff,
+                    strict=args.strict,
+                )
+            except Exception as ex:
+                # Catch per-entry: mai crashare il loop
+                st, msg = Status.FAIL, f"Unexpected error: {type(ex).__name__}"
+
+            results.append((e, st, msg))
+            print(f"{st.value} - {e.name} - {msg}")
+
+        # Scrivi SEMPRE il report
+        write_report(args.output, results, banner=None)
+
+        # Exit code: 1 se c'è almeno un FAIL
+        exit_code = 1 if any(st == Status.FAIL for _, st, _ in results) else 0
+        return exit_code
+
+    except Exception as ex:
+        # Catch-all: scrivi un report minimale pubblicabile e segnala FAIL
+        banner = f"Errore inatteso nello script: {type(ex).__name__}: {ex}"
+        try:
+            write_report(args.output, results, banner=banner)
+        except Exception:
+            # se anche la scrittura fallisse, almeno stampiamo
+            print("Failed to write report after unexpected error.", file=sys.stderr)
+
+        print(banner, file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
