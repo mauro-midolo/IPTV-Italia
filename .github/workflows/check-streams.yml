@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v5
 
       - name: Setup Python
         uses: actions/setup-python@v6
@@ -35,6 +35,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install requests
+
       - name: Force resolv.conf to Google DNS
         run: |
           set -e
@@ -42,13 +43,21 @@ jobs:
           echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf
           echo "nameserver 8.8.4.4" | sudo tee -a /etc/resolv.conf
           cat /etc/resolv.conf
-      - name: Run stream checks
+
+      - name: Run stream checks (do not stop the workflow)
+        id: streamcheck
         run: |
+          set +e
           python .github/scripts/check_streams.py \
             --playlist iptvitalia.m3u \
             --timeout 30 \
             --retries 3 \
             --output site/index.html
+          rc=$?
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+          echo "Stream check exit code: $rc"
+          # IMPORTANT: non fermare il job qui
+          exit 0
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
@@ -61,3 +70,12 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
+      - name: Fail job if checks failed (after report is published)
+        if: always()
+        run: |
+          if [ "${{ steps.streamcheck.outputs.exit_code }}" != "0" ]; then
+            echo "❌ Stream checks reported failures (exit code: ${{ steps.streamcheck.outputs.exit_code }}). Failing job AFTER deploy."
+            exit 1
+          fi
+          echo "✅ Stream checks OK."
