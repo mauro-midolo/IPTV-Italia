@@ -1,7 +1,7 @@
 # IPTV-Italia
 
 🇬🇧 English | 🇮🇹 [Italiano](README.it.md)
-https://mauro-midolo.github.io/IPTV-Italia/
+
 ![GitHub Release Version](https://img.shields.io/github/v/release/mauro-midolo/IPTV-Italia) ![GitHub Release Downloads](https://img.shields.io/github/downloads/mauro-midolo/IPTV-Italia/total) [![Check IPTV streams](https://github.com/mauro-midolo/IPTV-Italia/actions/workflows/check-streams.yml/badge.svg)](https://mauro-midolo.github.io/IPTV-Italia/)
 
 Repository dedicated to **legal IPTV resources** for Italian *free-to-air* TV channels.
