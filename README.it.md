@@ -1,6 +1,6 @@
 # IPTV-Italia
 
-🇮🇹 Italiano | 🇬🇧 [English](README.md)
+🇬🇧 [English](README.md) | 🇮🇹 Italiano
 
 ![GitHub Release Version](https://img.shields.io/github/v/release/mauro-midolo/IPTV-Italia) ![GitHub Release Downloads](https://img.shields.io/github/downloads/mauro-midolo/IPTV-Italia/total) [![Check IPTV streams](https://github.com/mauro-midolo/IPTV-Italia/actions/workflows/check-streams.yml/badge.svg)](https://github.com/mauro-midolo/IPTV-Italia/actions/workflows/check-streams.yml)
 
