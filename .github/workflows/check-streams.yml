@@ -22,6 +22,9 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -59,17 +62,90 @@ jobs:
           # IMPORTANT: non fermare il job qui
           exit 0
 
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
+      - name: Archive Pages artifact
+        run: |
+          set -euo pipefail
+          tar \
+            --dereference \
+            --hard-dereference \
+            --directory site \
+            -cvf "$RUNNER_TEMP/artifact.tar" \
+            --exclude=.git \
+            --exclude=.github \
+            --exclude='.[^/]*' \
+            .
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v4
+        id: upload
+        uses: actions/upload-artifact@v4
         with:
-          path: site
+          name: github-pages
+          path: ${{ runner.temp }}/artifact.tar
+          retention-days: 1
+          if-no-files-found: error
+          overwrite: true
 
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+          API_URL: ${{ github.api_url }}
+          REPOSITORY: ${{ github.repository }}
+          BUILD_VERSION: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          oidc_response=$(curl --fail --silent --show-error \
+            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL")
+          oidc_token=$(python -c 'import json,sys; print(json.load(sys.stdin)["value"])' <<<"$oidc_response")
+
+          deployment_payload=$(OIDC_TOKEN="$oidc_token" python -c 'import json,os; print(json.dumps({"artifact_id": int(os.environ["ARTIFACT_ID"]), "pages_build_version": os.environ["BUILD_VERSION"], "oidc_token": os.environ["OIDC_TOKEN"]}))')
+
+          create_response=$(curl --fail --silent --show-error \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "$API_URL/repos/$REPOSITORY/pages/deployments" \
+            -d "$deployment_payload")
+
+          deployment_id=$(python -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<<"$create_response")
+          page_url=$(python -c 'import json,sys; data=json.load(sys.stdin); print(data.get("page_url") or data.get("preview_url") or "")' <<<"$create_response")
+
+          echo "page_url=$page_url" >> "$GITHUB_OUTPUT"
+          echo "Created Pages deployment $deployment_id"
+
+          attempts=0
+          max_attempts=120
+          while :; do
+            attempts=$((attempts + 1))
+            status_response=$(curl --fail --silent --show-error \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "$API_URL/repos/$REPOSITORY/pages/deployments/$deployment_id")
+            status=$(python -c 'import json,sys; print(json.load(sys.stdin)["status"])' <<<"$status_response")
+            echo "Pages deployment status: $status"
+
+            case "$status" in
+              succeed)
+                break
+                ;;
+              deployment_failed|deployment_content_failed|deployment_cancelled|deployment_lost)
+                echo "GitHub Pages deployment failed with status: $status" >&2
+                exit 1
+                ;;
+            esac
+
+            if [ "$attempts" -ge "$max_attempts" ]; then
+              echo "Timed out waiting for Pages deployment to finish" >&2
+              exit 1
+            fi
+
+            sleep 5
+          done
 
       - name: Fail job if checks failed (after report is published)
         if: always()
